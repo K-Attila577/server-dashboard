@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home server</title>
+<style>
+:root{
+  --bg:#eef1ee; --surface:#fbfcfb; --ink:#1b2420; --muted:#5d6b64;
+  --line:#cdd6d0; --accent:#1f6f5c; --accent-ink:#ffffff; --warn:#9a5b00;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#121816; --surface:#1b2420; --ink:#e6ece8; --muted:#93a39a;
+        --line:#2e3b35; --accent:#4cc3a4; --accent-ink:#08201a; --warn:#e0a84a;}
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.4 "Trebuchet MS","Segoe UI",system-ui,sans-serif;
+  padding:max(20px,env(safe-area-inset-top)) 20px max(28px,env(safe-area-inset-bottom));}
+main{max-width:860px;margin:0 auto}
+header{display:flex;flex-wrap:wrap;gap:14px 20px;align-items:center;justify-content:space-between;margin-bottom:22px}
+h1{font-size:1.5rem;margin:0;letter-spacing:.01em}
+.sub{color:var(--muted);font-size:.9rem;margin-top:2px;word-break:break-all}
+.controls{display:flex;gap:10px;flex-wrap:wrap}
+.seg{display:inline-flex;border:1.5px solid var(--accent);border-radius:999px;overflow:hidden}
+.seg button{border:0;background:transparent;color:var(--accent);font:inherit;font-weight:600;padding:9px 18px;cursor:pointer;min-height:44px}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.edit{border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font:inherit;padding:9px 16px;border-radius:999px;cursor:pointer;min-height:44px}
+.edit[aria-pressed="true"]{border-color:var(--warn);color:var(--warn);font-weight:600}
+button:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;list-style:none;margin:0;padding:0}
+.item{position:relative;display:flex;align-items:stretch;background:var(--surface);border:1.5px solid var(--line);border-radius:10px}
+.item.drag{opacity:.4}
+.item.over{border-color:var(--accent);border-style:dashed}
+.open{flex:1;display:block;padding:14px 16px;color:inherit;text-decoration:none;border-radius:10px;min-height:64px}
+.open:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.name{font-weight:700;display:block}
+.meta{color:var(--muted);font-size:.85rem}
+.move{display:none;flex-direction:column;border-left:1.5px solid var(--line)}
+.move button{flex:1;border:0;background:transparent;color:var(--ink);font-size:1rem;padding:0 14px;cursor:pointer;min-width:44px}
+.move button+button{border-top:1.5px solid var(--line)}
+.move button:disabled{opacity:.25;cursor:default}
+body.editing .move{display:flex}
+body.editing .open{pointer-events:none}
+body.editing .item{cursor:grab}
+.bar{display:none;margin-top:16px;color:var(--muted);font-size:.9rem}
+body.editing .bar{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+.bar button{border:0;background:none;color:var(--accent);font:inherit;text-decoration:underline;cursor:pointer;padding:6px 0}
+@media (prefers-reduced-motion:no-preference){.item{transition:border-color .15s}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Home server</h1>
+      <div class="sub" id="sub"></div>
+    </div>
+    <div class="controls">
+      <div class="seg" role="group" aria-label="Network">
+        <button id="lan" aria-pressed="true">LAN</button>
+        <button id="ts" aria-pressed="false">Tailscale</button>
+      </div>
+      <button class="edit" id="edit" aria-pressed="false">Reorder</button>
+    </div>
+  </header>
+  <ul id="grid"></ul>
+  <div class="bar"><span>Drag cards or use the arrows. Order is saved on this device.</span>
+    <button id="reset">Reset order</button></div>
+</main>
+
+<script>
+// ---- Edit this block to change IPs or services ----
+const HOSTS = { lan: "192.168.100.13", ts: "100.95.19.54" };
+const SERVICES = [
+  { id:"jellyfin",    name:"Jellyfin",     desc:"Watch movies and shows", port:8096 },
+  { id:"navidrome",   name:"Navidrome",    desc:"Music player",           port:4533 },
+  { id:"metube",      name:"MeTube",       desc:"Download from YouTube",  port:8081 },
+  { id:"sonarr",      name:"Sonarr",       desc:"TV automation",          port:8989 },
+  { id:"radarr",      name:"Radarr",       desc:"Movie automation",       port:7878 },
+  { id:"prowlarr",    name:"Prowlarr",     desc:"Indexers",               port:9696 },
+  { id:"bazarr",      name:"Bazarr",       desc:"Subtitles",              port:6767 },
+  { id:"qbittorrent", name:"qBittorrent",  desc:"Torrents (via VPN)",     port:8080 },
+  { id:"tdarr",       name:"Tdarr",        desc:"Video re-encoding",      port:8265 },
+  { id:"filebrowser", name:"File Browser", desc:"Files, root access",     port:8088 },
+  { id:"termix",      name:"Termix",       desc:"SSH terminal",           port:8443 }
+];
+// ---------------------------------------------------
+
+const K = { net:"dash.net", order:"dash.order" };
+const store = {
+  get(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
+  set(k,v){ try{ localStorage.setItem(k,v); }catch(e){} },
+  del(k){ try{ localStorage.removeItem(k); }catch(e){} }
+};
+
+let net = store.get(K.net);
+if (net !== "lan" && net !== "ts") {
+  net = location.hostname === HOSTS.ts ? "ts" : "lan";
+}
+
+let order = [];
+try { order = JSON.parse(store.get(K.order) || "[]"); } catch(e){ order = []; }
+if (!Array.isArray(order)) order = [];
+// keep saved order, append any new services, drop removed ones
+order = order.filter(id => SERVICES.some(s => s.id === id));
+SERVICES.forEach(s => { if (!order.includes(s.id)) order.push(s.id); });
+
+const grid = document.getElementById("grid");
+const byId = Object.fromEntries(SERVICES.map(s => [s.id, s]));
+
+function url(s){ return "http://" + HOSTS[net] + ":" + s.port; }
+
+function render(){
+  document.getElementById("lan").setAttribute("aria-pressed", net === "lan");
+  document.getElementById("ts").setAttribute("aria-pressed", net === "ts");
+  document.getElementById("sub").textContent = "Using " + HOSTS[net] + (net === "ts" ? " (Tailscale)" : " (home network)");
+  grid.innerHTML = "";
+  order.forEach((id, i) => {
+    const s = byId[id];
+    const li = document.createElement("li");
+    li.className = "item"; li.draggable = document.body.classList.contains("editing");
+    li.dataset.id = id;
+    li.innerHTML =
+      '<a class="open" target="_blank" rel="noopener"><span class="name"></span><span class="meta"></span></a>' +
+      '<div class="move"><button data-d="-1" aria-label="Move up">▲</button><button data-d="1" aria-label="Move down">▼</button></div>';
+    const a = li.querySelector("a");
+    a.href = url(s);
+    li.querySelector(".name").textContent = s.name;
+    li.querySelector(".meta").textContent = s.desc + " · :" + s.port;
+    const [up, down] = li.querySelectorAll(".move button");
+    up.disabled = i === 0; down.disabled = i === order.length - 1;
+    grid.appendChild(li);
+  });
+}
+
+function save(){ store.set(K.order, JSON.stringify(order)); }
+function move(id, to){
+  const from = order.indexOf(id);
+  if (from < 0 || to < 0 || to >= order.length) return;
+  order.splice(to, 0, order.splice(from, 1)[0]);
+  save(); render();
+}
+
+document.getElementById("lan").onclick = () => { net = "lan"; store.set(K.net, net); render(); };
+document.getElementById("ts").onclick  = () => { net = "ts";  store.set(K.net, net); render(); };
+document.getElementById("edit").onclick = e => {
+  const on = !document.body.classList.contains("editing");
+  document.body.classList.toggle("editing", on);
+  e.currentTarget.setAttribute("aria-pressed", on);
+  e.currentTarget.textContent = on ? "Done" : "Reorder";
+  render();
+};
+document.getElementById("reset").onclick = () => {
+  store.del(K.order); order = SERVICES.map(s => s.id); render();
+};
+
+grid.addEventListener("click", e => {
+  const b = e.target.closest(".move button");
+  if (!b) return;
+  const id = b.closest(".item").dataset.id;
+  move(id, order.indexOf(id) + Number(b.dataset.d));
+});
+
+let dragId = null;
+grid.addEventListener("dragstart", e => {
+  const li = e.target.closest(".item"); if (!li) return;
+  dragId = li.dataset.id; li.classList.add("drag");
+  e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", dragId);
+});
+grid.addEventListener("dragover", e => {
+  const li = e.target.closest(".item"); if (!li || !dragId) return;
+  e.preventDefault();
+  grid.querySelectorAll(".over").forEach(x => x.classList.remove("over"));
+  li.classList.add("over");
+});
+grid.addEventListener("drop", e => {
+  const li = e.target.closest(".item"); if (!li || !dragId) return;
+  e.preventDefault(); move(dragId, order.indexOf(li.dataset.id)); dragId = null;
+});
+grid.addEventListener("dragend", () => { dragId = null; render(); });
+
+render();
+</script>
+</body>
+</html>
